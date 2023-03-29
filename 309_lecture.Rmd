@@ -1,0 +1,292 @@
+---
+title: "ENVIRON 309 Lecture"
+author: "Melissa Mattwig"
+date: "2023-03-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Open Source Geospatial Analyses in R
+
+We are using this R Markdown document to show how R can be used for quick analyses and mapping of geospatial data. We will start by looking at census data in Cuyahoga county, OH (Cleveland).
+
+### First, **what is R?**
+R is a language and environment for statistical computing and graphics. Many functionalities in R are through *packages*. An R package is an extension of R containing data sets and specific functions to solve specific questions. Packages are free to download and use.
+
+```{r packages, warning = FALSE}
+# For plotting
+library(ggplot2)
+# For downloading Census data
+library(tidycensus)
+library(tidyr)
+# For creating tmap
+library(tmap)
+# For reading and processing spatial data related to tmap      
+library(tmaptools)
+# For data wrangling
+library(dplyr)        
+# For reading, writing and working with spatial objects
+library(sf)      
+library(rgeos)
+library(rgdal)
+library(maptools)    
+# also loads sp()
+library(RColorBrewer) # creates nice color schemes
+library(classInt)     # finds class intervals for continuous variables
+       
+#install.packages("cartography")
+library(cartography) 
+library(SpatialPosition)
+library(mapsf)
+library(maptiles)
+library(osmdata)
+library(ggpubr)
+library(ggmap)
+library(ggspatial)
+```
+
+## Data setup
+
+Sometimes census data can be computationally expensive due to it's size, especially since you get ALL the variables when you download the shapefiles from the internet. In R, we can use an [Application Programming Interface (API)](https://en.wikipedia.org/wiki/API) to access the features and data of the census website. In this way, we can specify the only the variables we want to avoid unnecessarily large data sets. In this first example, we will be using an API key to get the median household income for Ohio in 2021 based on the [American Community Survey](https://www.census.gov/programs-surveys/acs/about.html)
+
+
+```{r, echo=TRUE, message = FALSE, results = 'hide'}
+
+## Set working directory, akin to making a folder connection in ArcGIS Pro
+setwd("/Users/Matt/Desktop/ENVIRON 309/gsi")
+ohio <- get_acs(state = "OH", geography = "tract", variables = "B19013_001", geometry = TRUE, cb = FALSE)
+head(ohio)
+```
+
+Looking at this data is similar to looking at an attribute table in ArcGIS Pro. We can see the geometry type (polygon), as well as the value (estimate) for the ACS attribute we wanted (variable). Now let's make a simple map with this data.
+
+```{r}
+ohio %>%
+  ggplot(aes(fill = estimate)) + 
+  guides(fill=guide_legend(title="Median Household Income (2021)")) + 
+  geom_sf(color = NA) +
+  coord_sf(crs = 4326) +
+  scale_fill_viridis_c(option = "magma")
+```
+
+
+Now let's look at some demographic data in Cuyahoga county, OH (city of Cleveland) using the Census data from 2010
+
+
+```{r, message = FALSE, results = 'hide'}
+## Here we specify which Census variables we want to include
+demovars <- c(White = "P005003",
+              Black = "P005004",
+              Asian = "P005006",
+              Hispanic = "P004003",
+              HouseUnits = "H001001",
+              Rent = "H004004" )
+
+## Now let's use the API call again to get ACS data for Cuyahoga county
+cuyahoga <- get_decennial(geography = "tract", variables = demovars,
+                       state = "OH", county = "Cuyahoga County", geometry = TRUE,
+                       summary_var = "P001001")
+
+## Here we are reprojecting the data to NAD83 / Ohio North
+cuyahoga <- st_transform(cuyahoga, crs = 32122)
+
+## Here we are changing the setup of the table to have a more intuitive spread of the demographic variables (as columns rather than separate rows)
+cuyahoga <- cuyahoga %>% 
+  spread(variable, value) %>%
+  rename("Pop2010" = "summary_value") 
+
+```
+
+What other kinds of maps can we make with this data?
+
+Let's start with a [Choropleth Map](https://en.wikipedia.org/wiki/Choropleth_map)
+```{r}
+cuyahoga$PopDens <- 1e6 * cuyahoga$Pop2010 / st_area(cuyahoga)
+# plot municipalities (only the backgroung color is plotted)
+plot(st_geometry(cuyahoga), col = NA, border = NA, bg = "gray")
+# plot population density
+choroLayer(
+  x = cuyahoga, 
+  var = "PopDens",
+  method = "quantile",
+  nclass=5,
+  col = carto.pal(pal1 = "sand.pal", n1 = 5),
+  border = "white", 
+  lwd = 0.5,
+  legend.pos = "bottomright", 
+  legend.title.txt = "Population Density\n(people per km2)",
+  add = TRUE
+) 
+# layout
+layoutLayer(title = "Population Distribution in Cuyahoga County", 
+            sources = "Sources: US Census, 2010",
+            author = paste0("cartography ", packageVersion("cartography")), 
+            frame = FALSE, north = FALSE, tabtitle = TRUE, theme= "sand.pal") 
+# north arrow
+north(pos = "topleft")
+```
+
+
+Now let's look at a Grid map, which is nice because it can remove the arbitrariness of administrative divisions in the Census
+
+```{r, warning = FALSE}
+## First we build the regular grid
+mygrid <- getGridLayer(
+  x = na.omit(cuyahoga), 
+  cellsize = median(as.numeric(st_area(cuyahoga))), 
+  var = "Pop2010",
+  type = "hexagonal"
+)
+## Now we compute population density in people per km2
+mygrid$PopDens <- 1e6 * mygrid$Pop2010 / mygrid$gridarea
+plot(st_geometry(cuyahoga), col = NA, border = NA, bg = "#deffff")
+# Plot the population density for the grid
+choroLayer(x = mygrid, var = "PopDens", method = "fisher-jenks", nclass=10, 
+           col = carto.pal(pal1 = "turquoise.pal", n1 = 10), border = "grey80", 
+           lwd = 0.5, legend.pos = "bottomright", add = TRUE,
+           legend.title.txt = "Population Density\n(people per km2)") 
+layoutLayer(title = "Population Distribution in Cuyahoga County, OH", 
+            sources = "Sources: US Census, 2010",
+            author = paste0("cartography ", packageVersion("cartography")), 
+            frame = FALSE, north = FALSE, tabtitle = TRUE,
+            theme = "turquoise.pal")
+# add north arrow
+north(pos = "topleft")
+```
+
+
+Now let's look at colorized proportional symbols using a map that looks at demographic information related to the percentage of home rentals.
+
+```{r}
+## Let's first calculate the proportion of rental homes 
+cuyahoga$PropTenure <- cuyahoga$Rent / cuyahoga$HouseUnits * 100
+## Add a base layer of the tracts
+plot(st_geometry(cuyahoga), col="darkseagreen3", border="darkseagreen4",  
+     bg = "lightgray", lwd = 0.5)
+# Plot symbols with choropleth coloration
+propSymbolsChoroLayer(
+  x = cuyahoga, 
+  var = "Black", 
+  inches = 0.08,
+  border = "grey50",
+  lwd = 1,
+  legend.var.pos = "topright", 
+  legend.var.title.txt = "Black Population",
+  legend.values.cex = 0.5,
+  var2 = "PropTenure",
+  method = "equal", 
+  nclass = 4, 
+  col = carto.pal(pal1 = "sand.pal", n1 = 4),
+  legend.var2.values.rnd = 1,
+  legend.var2.pos = "bottomright", 
+  legend.var2.title.txt = "Proportion Rental"
+) 
+# layout
+layoutLayer(title="Black Population & Housing Rentals in Cleveland, 2010", 
+            author = "M.Mattwig", 
+            sources = "Sources: US Census, 2010", 
+            scale = 5, tabtitle = TRUE, frame = FALSE)
+# north arrow
+north(pos = "topleft")
+```
+
+
+What if we wanted to read in other data that we already have? I'm reading in two vectors, landuse polygons and trail lines from Stinchfield Woods in Michigan, as shapefiles to create a map layout.
+
+```{r}
+landcover <- st_read("Landcover_mmattwig.shp")
+trails <- st_read("Trails_mmattwig.shp")
+```
+Now let's make a map layout with this data
+
+```{r}
+col <- c("darkgreen", "green", "lightgreen", "lightyellow")
+
+## Change attribute names so they are easier to read in legend
+landcover$Landcover[landcover$Landcover == "MF"] <- "Mixed Forest"
+landcover$Landcover[landcover$Landcover == "CF"] <- "Coniferous Forest"
+landcover$Landcover[landcover$Landcover == "DF"] <- "Deciduous Forest"
+landcover$Landcover[landcover$Landcover == "OF"] <- "Open Field"
+
+ggplot() + geom_sf(data = landcover, lwd = 0, aes(fill = Landcover)) + scale_fill_manual(values = col) + geom_sf(data = trails, lwd = 1, aes(color = "black")) + scale_color_manual(values = "black", name = "Trails") + labs(title = "Landcover and Trails of Stinchfield Woods") + annotation_scale(location = "bl", width_hint = 0.4) + annotation_north_arrow(location = "bl", which_north = "true", 
+        pad_x = unit(0.0, "in"), pad_y = unit(0.2, "in"),
+        style = north_arrow_fancy_orienteering)
+```
+
+So we've seen that we can make maps in R, but what about manipulating data? Let's look at the fire data that was used in Assignment 2. The Washington boundary data is retrived from the [Washington State Geospatial Open Data Portal](https://geo.wa.gov/datasets/a77ee02fab3e4793b274ec52b7a523d8/explore?location=47.149035%2C-121.191722%2C7.66)
+
+```{r}
+wa_boundary <- st_read("WA_State_Boundary.shp")
+fires <- st_read("mtbs_FODpoints_DD.shp")
+
+ggplot() + geom_sf(data = fires, aes(fill = Incid_Type)) + geom_sf(data = wa_boundary)
+```
+
+Let's check the projection of these layers
+
+```{r}
+st_crs(fires)
+st_crs(wa_boundary)
+```
+
+
+Let's re-project both of these data layers to be in UTM Zone 10 North so it's a better projection for Washington state
+
+```{r}
+wa_boundary <- st_transform(wa_boundary, crs = 32610)
+fires <- st_transform(fires, crs = 32610)
+
+ggplot() + geom_sf(data = fires, aes(fill = Incid_Type)) + geom_sf(data = wa_boundary)
+```
+
+Now let's clip the fire data to the Washington state boundary
+
+```{r}
+## Here we are actually subsetting, but for all intents and purposes it is the same as clipping in ArcGIS Pro
+wa_fires <- fires[wa_boundary, ]
+
+## Map of clipped data 
+ggplot() + geom_sf(data = wa_boundary) +geom_sf(data = wa_fires, aes(fill = Incid_Type))
+```
+
+What if we want to compare fire occurrences over multiple years?
+
+```{r}
+## First, we need to convert the Ig_Date column to be of type 'date'
+wa_fires$Ig_Date <- as.Date(wa_fires$Ig_Date)
+
+## Now we will subset the dates we want
+wa_fires2000_2010 <- wa_fires[wa_fires$Ig_Date > "2000-01-01" & wa_fires$Ig_Date < "2010-01-01",]
+wa_fires2010_2020 <- wa_fires[wa_fires$Ig_Date > "2010-01-01" & wa_fires$Ig_Date < "2020-01-01",]
+
+## Now we'll remove any unknown fires from our analysis
+wa_fires2000_2010 <- wa_fires2000_2010[wa_fires2000_2010$Incid_Type == "Prescribed Fire" | 
+                                         wa_fires2000_2010$Incid_Type == "Wildfire",]
+wa_fires2010_2020 <- wa_fires2010_2020[wa_fires2010_2020$Incid_Type == "Prescribed Fire" | 
+                                         wa_fires2010_2020$Incid_Type == "Wildfire",]
+
+colnames(wa_fires2000_2010)[4] <- 'IncidenceType'
+colnames(wa_fires2010_2020)[4] <- 'IncidenceType'
+
+wa_2000_2010_map <- ggplot() + geom_sf(data = wa_boundary) + geom_sf(data = wa_fires2000_2010, aes(color = IncidenceType)) +
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank()) + labs(title = "Fire Occurrences in Washington State from 2000-2010") + annotation_scale(location = "bl", width_hint = 0.4) + annotation_north_arrow(location = "bl", which_north = "true", 
+        pad_x = unit(0.0, "in"), pad_y = unit(0.2, "in"),
+        style = north_arrow_fancy_orienteering)
+
+wa_2010_2020_map <- ggplot() + geom_sf(data = wa_boundary) +geom_sf(data = wa_fires2010_2020, aes(color = IncidenceType)) +
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank(), axis.text.x=element_blank(), axis.ticks.x=element_blank())+ labs(title = "2010-2020") + annotation_scale(location = "bl", width_hint = 0.4) + annotation_north_arrow(location = "bl", which_north = "true", 
+        pad_x = unit(0.0, "in"), pad_y = unit(0.2, "in"),
+        style = north_arrow_fancy_orienteering)
+
+wa_2000_2010_map
+wa_2010_2020_map 
+
+maps <- ggarrange(wa_2000_2010_map, wa_2010_2020_map, ncol = 1, nrow = 2)
+maps
+```
+
+
+
